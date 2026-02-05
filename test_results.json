@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "query": "robot AND (artificial intelligence OR AI OR machine learning OR neural OR deep learning)",
+  "keyword": "robot",
+  "total_articles": 298,
+  "articles": [],
+  "timestamp": "2026-02-05T20:02:43.326893",
+  "api_calls_remaining": "unknown"
+}
