@@ -1,14 +1,1 @@
 requests==2.31.0
-```
-
----
-
-### **File 3: `.gcloudignore`** (optional, excludes files from deployment)
-```
-.git
-.gitignore
-__pycache__/
-*.pyc
-test_results.json
-README.md
-.env
