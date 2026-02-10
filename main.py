@@ -274,14 +274,17 @@ Respond in this exact JSON format (no markdown, no backticks):
         if not articles:
             return []
 
-        # Build a compact representation of articles for the LLM
-        # We send title + description (not full content) to keep costs low
+        # Build article representations for the LLM including content
+        # Full content gives the model much better understanding of what
+        # each article is actually about, beyond clickbait titles
         article_summaries = []
         for i, article in enumerate(articles):
+            content_preview = (article.get('content') or '')[:800]
             article_summaries.append(
                 f"[{i}] {article['title']}\n"
                 f"    Source: {article['source_name']}\n"
-                f"    Description: {article['description'][:200]}"
+                f"    Description: {article['description'][:200]}\n"
+                f"    Content: {content_preview}"
             )
 
         articles_text = "\n\n".join(article_summaries)
@@ -326,7 +329,7 @@ Respond with ONLY a JSON array (no markdown, no backticks). Each element should 
                     "temperature": 0.2,  # Very low = consistent scoring
                     "max_tokens": 2000
                 },
-                timeout=30
+                timeout=45
             )
             response.raise_for_status()
             data = response.json()
