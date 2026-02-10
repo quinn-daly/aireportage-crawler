@@ -4,105 +4,223 @@ import json
 from datetime import datetime, UTC, timedelta
 from typing import Dict, List, Optional
 
+
 class GNewsAICrawler:
     """
     GNews API Crawler for AI-related articles
+    Enhanced with semantic search via OpenAI
     Deployed on Google Cloud Functions
     """
-    
+
     BASE_URL = "https://gnews.io/api/v4/search"
-    
-    def __init__(self, api_key: str = None):
+
+    def __init__(self, api_key: str = None, openai_api_key: str = None):
         self.api_key = api_key or os.getenv('GNEWS_API_KEY')
+        self.openai_api_key = openai_api_key or os.getenv('OPENAI_API_KEY')
         if not self.api_key:
             raise ValueError("GNews API key required")
-    
-    def search_articles(self, 
-                       keyword: str,
-                       max_results: int = 10,
-                       days_back: int = 30,  # Changed for free tier
-                       language: str = 'en',
-                       search_in: str = 'title,content',
-                       sort_by: str = 'relevance',
-                       expand_content: bool = False) -> Dict:  # Changed default to False for free tier
+        if not self.openai_api_key:
+            raise ValueError("OpenAI API key required")
+
+    # ============================================
+    # STEP 1: SEMANTIC QUERY GENERATION
+    # ============================================
+    # This is where natural language becomes keyword search.
+    # Students type what they're looking for in plain English,
+    # and GPT-4o-mini translates that into an optimized boolean
+    # query that GNews can understand.
+    #
+    # WHY THIS MATTERS FOR TEACHING:
+    # - Shows students that search engines don't "understand" meaning
+    # - Makes the translation from intent → keywords visible
+    # - Demonstrates how AI can bridge the gap between human
+    #   language and machine search
+    # ============================================
+
+    def generate_search_query(self, natural_language_query: str, keyword: str) -> Dict:
         """
-        Search for articles using GNews API
-        
+        Use OpenAI to translate a natural language query into an
+        optimized GNews boolean search query.
+
         Args:
-            keyword: Primary search keyword (e.g., 'robot', 'hallucination')
-            max_results: Number of articles to return (1-100)
-            days_back: How many days back to search (max 30 for free tier)
-            language: Language code ('en' for English)
-            search_in: Where to search ('title,content', 'title,description', etc.)
-            sort_by: Sort order ('relevance' or 'publishedAt')
-            expand_content: Include full article content (limited on free tier)
-            
+            natural_language_query: What the student typed in plain English
+            keyword: The student's assigned AIReportage keyword
+
+        Returns:
+            Dict with generated query and the reasoning behind it
+        """
+
+        prompt = f"""You are a search query optimizer. A student is researching the topic 
+of "{keyword}" in the context of artificial intelligence for an academic archive project.
+
+The student described what they're looking for:
+"{natural_language_query}"
+
+Your job is to generate an optimized search query for the GNews API, which uses 
+keyword-based boolean search (supports AND, OR, NOT, and parentheses).
+
+Rules:
+- Include relevant AI-related terms naturally (don't just append a generic AI block)
+- Use synonyms and related terms the student might not have thought of
+- Keep the query focused — don't make it so broad it returns noise
+- Maximum ~120 characters for the query string
+- Use boolean operators: AND, OR, NOT, parentheses for grouping
+
+Respond in this exact JSON format (no markdown, no backticks):
+{{
+    "search_query": "your optimized boolean query here",
+    "reasoning": "2-3 sentence explanation of why you chose these terms and structure",
+    "terms_added": ["list", "of", "terms", "you", "added", "beyond", "what", "student", "said"],
+    "terms_excluded": ["any", "terms", "you", "deliberately", "avoided"]
+}}"""
+
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.openai_api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {"role": "system", "content": "You are a precise search query optimizer. Always respond with valid JSON only."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.3,  # Low temperature = more focused, less creative
+                    "max_tokens": 300
+                },
+                timeout=15
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # Parse the LLM's response
+            content = data['choices'][0]['message']['content'].strip()
+            # Clean potential markdown code fences
+            content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            query_data = json.loads(content)
+
+            return {
+                "success": True,
+                "search_query": query_data.get("search_query", ""),
+                "reasoning": query_data.get("reasoning", ""),
+                "terms_added": query_data.get("terms_added", []),
+                "terms_excluded": query_data.get("terms_excluded", []),
+                "original_input": natural_language_query
+            }
+
+        except Exception as e:
+            print(f"OpenAI query generation failed: {e}")
+            # Fallback: use the old-style static query
+            return {
+                "success": False,
+                "search_query": self._fallback_query(keyword),
+                "reasoning": "Fallback: OpenAI was unavailable, using standard keyword + AI terms.",
+                "terms_added": [],
+                "terms_excluded": [],
+                "original_input": natural_language_query,
+                "error": str(e)
+            }
+
+    def _fallback_query(self, keyword: str) -> str:
+        """Original static query as fallback"""
+        ai_terms = "(artificial intelligence OR AI OR machine learning OR neural OR deep learning)"
+        return f"{keyword} AND {ai_terms}"
+
+    # ============================================
+    # STEP 2: FETCH ARTICLES FROM GNEWS
+    # ============================================
+    # This step is pure keyword search — GNews looks for the
+    # exact terms in our query within article titles and content.
+    # It has no understanding of meaning, just pattern matching.
+    # ============================================
+
+    def search_articles(self,
+                        query: str,
+                        keyword: str,
+                        max_results: int = 30,
+                        days_back: int = 365,
+                        language: str = 'en',
+                        search_in: str = 'title,content',
+                        sort_by: str = 'relevance',
+                        expand_content: bool = True) -> Dict:
+        """
+        Search for articles using GNews API with the generated query.
+
+        Args:
+            query: The optimized boolean search query (from Step 1)
+            keyword: The student's assigned keyword (for metadata)
+            max_results: Number of articles to fetch (fetch more than needed
+                        so Step 3 can filter to the best ones)
+            days_back: How far back to search (enterprise tier: up to years)
+            language: Language code
+            search_in: Where to search in articles
+            sort_by: Sort order
+            expand_content: Include full article content
+
         Returns:
             Dictionary with articles and metadata
         """
-        
-        # Build AI-focused query
-        ai_terms = "(artificial intelligence OR AI OR machine learning OR neural OR deep learning)"
-        query = f"{keyword} AND {ai_terms}"
-        
-        # Calculate date range for free tier (last 30 days max)
+
+        # Calculate date range
         end_date = datetime.now(UTC)
-        start_date = end_date - timedelta(days=min(days_back, 30))
-        
-        # Build request parameters
+        start_date = end_date - timedelta(days=days_back)
+
         params = {
             'apikey': self.api_key,
             'q': query,
             'lang': language,
-            'max': max_results,
+            'max': min(max_results, 100),  # GNews caps at 100
             'from': start_date.isoformat(),
             'to': end_date.isoformat(),
             'in': search_in,
             'nullable': 'image',
             'sortby': sort_by
         }
-        
+
         if expand_content:
             params['expand'] = 'content'
-        
+
         try:
-            print(f"Searching GNews for: {query}")
+            print(f"[STEP 2] Searching GNews for: {query}")
             print(f"Date range: {start_date.date()} to {end_date.date()}")
-            
+
             response = requests.get(self.BASE_URL, params=params, timeout=30)
             response.raise_for_status()
-            
             data = response.json()
-            
+
+            articles = self._process_articles(data.get('articles', []))
+
             result = {
                 'success': True,
-                'query': query,
+                'query_used': query,
                 'keyword': keyword,
                 'total_articles': data.get('totalArticles', 0),
-                'articles': self._process_articles(data.get('articles', [])),
+                'articles': articles,
                 'timestamp': datetime.now(UTC).isoformat(),
                 'date_range': {
                     'from': start_date.isoformat(),
                     'to': end_date.isoformat()
                 }
             }
-            
-            print(f"✓ Found {len(result['articles'])} articles")
+
+            print(f"✓ Fetched {len(articles)} articles from GNews")
             return result
-            
+
         except requests.exceptions.RequestException as e:
             return {
                 'success': False,
                 'error': str(e),
-                'query': query,
+                'query_used': query,
                 'keyword': keyword,
                 'timestamp': datetime.now(UTC).isoformat()
             }
-    
+
     def _process_articles(self, articles: List[Dict]) -> List[Dict]:
-        """Process and structure article data"""
+        """Process and structure raw article data from GNews"""
         processed = []
-        
+
         for idx, article in enumerate(articles, 1):
             processed.append({
                 'rank': idx,
@@ -114,32 +232,170 @@ class GNewsAICrawler:
                 'published_at': article.get('publishedAt', ''),
                 'source_name': article.get('source', {}).get('name', 'Unknown'),
                 'source_url': article.get('source', {}).get('url', ''),
-                # Placeholders for bonus features
-                'ai_summary': None,
-                'relevance_score': None,
-                'keep_recommendation': None
             })
-        
+
         return processed
+
+    # ============================================
+    # STEP 3: SEMANTIC RELEVANCE SCORING
+    # ============================================
+    # This is where the "understanding" happens. Unlike GNews
+    # which just matched keywords, here the LLM actually reads
+    # each article's title + description and judges how relevant
+    # it is to what the student is actually looking for.
+    #
+    # WHY THIS MATTERS FOR TEACHING:
+    # - Keyword search: "robot" matches an article about Robot
+    #   vacuum cleaners — technically correct, semantically wrong
+    # - Semantic scoring: the LLM understands that "robot" in the
+    #   context of AI labor research means something different
+    # - Students see the score AND the explanation, making the
+    #   AI's reasoning transparent and debatable
+    # ============================================
+
+    def score_articles(self,
+                       articles: List[Dict],
+                       natural_language_query: str,
+                       keyword: str,
+                       top_n: int = 10) -> List[Dict]:
+        """
+        Use OpenAI to semantically score and rank articles.
+
+        Args:
+            articles: List of articles from GNews (Step 2 output)
+            natural_language_query: The student's original query
+            keyword: The assigned research keyword
+            top_n: How many top articles to return
+
+        Returns:
+            List of articles, sorted by relevance, with scores and explanations
+        """
+
+        if not articles:
+            return []
+
+        # Build a compact representation of articles for the LLM
+        # We send title + description (not full content) to keep costs low
+        article_summaries = []
+        for i, article in enumerate(articles):
+            article_summaries.append(
+                f"[{i}] {article['title']}\n"
+                f"    Source: {article['source_name']}\n"
+                f"    Description: {article['description'][:200]}"
+            )
+
+        articles_text = "\n\n".join(article_summaries)
+
+        prompt = f"""You are evaluating search results for an academic AI research archive.
+
+STUDENT'S RESEARCH KEYWORD: "{keyword}"
+STUDENT'S SEARCH INTENT: "{natural_language_query}"
+
+Below are {len(articles)} articles returned by a keyword search. For each article, 
+assign a relevance score from 0-100 and a brief explanation.
+
+Scoring criteria:
+- 80-100: Directly addresses the student's research intent AND relates to AI
+- 60-79: Related to the topic but tangential, or only loosely connected to AI
+- 40-59: Mentions relevant terms but is really about something else
+- 0-39: Not relevant (e.g., keyword coincidence, different domain entirely)
+
+ARTICLES:
+{articles_text}
+
+Respond with ONLY a JSON array (no markdown, no backticks). Each element should be:
+{{
+    "index": 0,
+    "score": 85,
+    "explanation": "Brief 1-sentence reason for this score"
+}}"""
+
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.openai_api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {"role": "system", "content": "You are a precise academic relevance evaluator. Always respond with valid JSON arrays only."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.2,  # Very low = consistent scoring
+                    "max_tokens": 2000
+                },
+                timeout=30
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            content = data['choices'][0]['message']['content'].strip()
+            content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            scores = json.loads(content)
+
+            # Merge scores back into articles
+            score_map = {s['index']: s for s in scores}
+
+            for i, article in enumerate(articles):
+                if i in score_map:
+                    article['relevance_score'] = score_map[i]['score']
+                    article['score_explanation'] = score_map[i]['explanation']
+                else:
+                    article['relevance_score'] = 50  # Default if scoring missed it
+                    article['score_explanation'] = "No score generated"
+
+            # Sort by relevance score (highest first) and take top N
+            articles.sort(key=lambda a: a.get('relevance_score', 0), reverse=True)
+            top_articles = articles[:top_n]
+
+            # Re-rank after sorting
+            for i, article in enumerate(top_articles, 1):
+                article['semantic_rank'] = i
+
+            print(f"✓ Scored {len(articles)} articles, returning top {len(top_articles)}")
+            return top_articles
+
+        except Exception as e:
+            print(f"OpenAI scoring failed: {e}")
+            # Fallback: return articles as-is with no scores
+            for article in articles[:top_n]:
+                article['relevance_score'] = None
+                article['score_explanation'] = f"Scoring unavailable: {str(e)}"
+                article['semantic_rank'] = article['rank']
+            return articles[:top_n]
 
 
 # ============================================
 # GOOGLE CLOUD FUNCTION ENTRY POINT
 # ============================================
+# This orchestrates the 3-step pipeline:
+#   1. Natural language → keyword query (OpenAI)
+#   2. Keyword query → articles (GNews)
+#   3. Articles → scored & ranked articles (OpenAI)
+# ============================================
+
 def crawl_articles(request):
     """
     Main entry point for Google Cloud Function
-    
+
     Expected JSON body:
     {
         "keyword": "robot",
+        "natural_query": "How are robots replacing warehouse workers?",
         "max_results": 10,
-        "days_back": 30
+        "days_back": 365,
+        "use_semantic": true
     }
-    
-    Returns: JSON with articles or error
+
+    When use_semantic is true (default), the full 3-step pipeline runs.
+    When false, it falls back to the original keyword-only search.
+    This toggle lets students compare the two approaches side by side.
+
+    Returns: JSON with articles, query metadata, and scoring transparency
     """
-    
+
     # Handle CORS for Apps Script
     if request.method == 'OPTIONS':
         headers = {
@@ -149,15 +405,15 @@ def crawl_articles(request):
             'Access-Control-Max-Age': '3600'
         }
         return ('', 204, headers)
-    
-    # Set CORS headers for main request
+
     headers = {
-        'Access-Control-Allow-Origin': '*'
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'application/json'
     }
-    
+
     try:
         request_json = request.get_json(silent=True)
-        
+
         if not request_json or 'keyword' not in request_json:
             return (
                 json.dumps({
@@ -167,25 +423,90 @@ def crawl_articles(request):
                 400,
                 headers
             )
-        
+
         keyword = request_json['keyword']
+        natural_query = request_json.get('natural_query', '')
         max_results = request_json.get('max_results', 10)
-        days_back = request_json.get('days_back', 30)
-        
+        days_back = request_json.get('days_back', 365)
+        use_semantic = request_json.get('use_semantic', True)
+        fetch_count = request_json.get('fetch_count', 30)  # Fetch more, return fewer
+
         # Initialize crawler
         crawler = GNewsAICrawler()
-        
-        # Search articles
-        result = crawler.search_articles(
+
+        # ---- STEP 1: Generate optimized query ----
+        if use_semantic and natural_query:
+            print("[PIPELINE] Step 1: Generating semantic search query...")
+            query_result = crawler.generate_search_query(natural_query, keyword)
+            search_query = query_result['search_query']
+        else:
+            # Classic mode: static keyword + AI terms
+            search_query = crawler._fallback_query(keyword)
+            query_result = {
+                'success': True,
+                'search_query': search_query,
+                'reasoning': 'Classic mode: using standard keyword + AI boolean terms.',
+                'terms_added': [],
+                'terms_excluded': [],
+                'original_input': natural_query or keyword
+            }
+
+        # ---- STEP 2: Fetch articles from GNews ----
+        print("[PIPELINE] Step 2: Fetching articles from GNews...")
+        gnews_result = crawler.search_articles(
+            query=search_query,
             keyword=keyword,
-            max_results=max_results,
+            max_results=fetch_count if use_semantic else max_results,
             days_back=days_back
         )
-        
-        status_code = 200 if result['success'] else 500
-        
-        return (json.dumps(result), status_code, headers)
-        
+
+        if not gnews_result['success']:
+            return (json.dumps(gnews_result), 500, headers)
+
+        # ---- STEP 3: Score and rank articles ----
+        if use_semantic and natural_query and gnews_result['articles']:
+            print("[PIPELINE] Step 3: Scoring articles for semantic relevance...")
+            scored_articles = crawler.score_articles(
+                articles=gnews_result['articles'],
+                natural_language_query=natural_query,
+                keyword=keyword,
+                top_n=max_results
+            )
+        else:
+            scored_articles = gnews_result['articles'][:max_results]
+
+        # ---- BUILD RESPONSE ----
+        # Include all the transparency data students need to see
+        result = {
+            'success': True,
+            'mode': 'semantic' if (use_semantic and natural_query) else 'classic',
+
+            # Step 1 transparency
+            'query_generation': {
+                'student_input': natural_query or keyword,
+                'generated_query': query_result['search_query'],
+                'reasoning': query_result['reasoning'],
+                'terms_added': query_result.get('terms_added', []),
+                'terms_excluded': query_result.get('terms_excluded', [])
+            },
+
+            # Step 2 metadata
+            'gnews_metadata': {
+                'total_available': gnews_result.get('total_articles', 0),
+                'fetched': len(gnews_result.get('articles', [])),
+                'returned': len(scored_articles),
+                'date_range': gnews_result.get('date_range', {})
+            },
+
+            # Step 3 results
+            'articles': scored_articles,
+
+            'keyword': keyword,
+            'timestamp': datetime.now(UTC).isoformat()
+        }
+
+        return (json.dumps(result), 200, headers)
+
     except Exception as e:
         return (
             json.dumps({
