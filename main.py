@@ -140,7 +140,6 @@ Respond in this exact JSON format (no markdown, no backticks):
                         query: str,
                         keyword: str,
                         max_results: int = 30,
-                        days_back: int = 365,
                         language: str = 'en',
                         search_in: str = 'title,content',
                         sort_by: str = 'relevance',
@@ -163,9 +162,9 @@ Respond in this exact JSON format (no markdown, no backticks):
             Dictionary with articles and metadata
         """
 
-        # Calculate date range
-        end_date = datetime.now(UTC)
-        start_date = end_date - timedelta(days=days_back)
+        # Fixed date range: June 1, 2023 to June 1, 2024
+        start_date = datetime(2023, 6, 1, tzinfo=UTC)
+        end_date = datetime(2024, 6, 1, tzinfo=UTC)
 
         params = {
             'apikey': self.api_key,
@@ -388,9 +387,10 @@ def crawl_articles(request):
         "keyword": "robot",
         "natural_query": "How are robots replacing warehouse workers?",
         "max_results": 10,
-        "days_back": 365,
         "use_semantic": true
     }
+
+    Date range is fixed to June 1, 2023 – June 1, 2024.
 
     When use_semantic is true (default), the full 3-step pipeline runs.
     When false, it falls back to the original keyword-only search.
@@ -430,7 +430,6 @@ def crawl_articles(request):
         keyword = request_json['keyword']
         natural_query = request_json.get('natural_query', '')
         max_results = request_json.get('max_results', 10)
-        days_back = request_json.get('days_back', 365)
         use_semantic = request_json.get('use_semantic', True)
         fetch_count = request_json.get('fetch_count', 30)  # Fetch more, return fewer
 
@@ -459,8 +458,7 @@ def crawl_articles(request):
         gnews_result = crawler.search_articles(
             query=search_query,
             keyword=keyword,
-            max_results=fetch_count if use_semantic else max_results,
-            days_back=days_back
+            max_results=fetch_count if use_semantic else max_results
         )
 
         if not gnews_result['success']:
