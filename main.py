@@ -283,7 +283,7 @@ Respond in this exact JSON format (no markdown, no backticks):
         # each article is actually about, beyond clickbait titles
         article_summaries = []
         for i, article in enumerate(articles):
-            content_preview = (article.get('content') or '')[:800]
+            content_preview = (article.get('content') or '')[:500]
             article_summaries.append(
                 f"[{i}] {article['title']}\n"
                 f"    Source: {article['source_name']}\n"
