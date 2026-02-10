@@ -65,6 +65,8 @@ Rules:
 - Keep the query focused — don't make it so broad it returns noise
 - Maximum ~120 characters for the query string
 - Use boolean operators: AND, OR, NOT, parentheses for grouping
+- NEVER use quotes (single or double) — the API does not support phrase matching
+- Use only single words as search terms, not multi-word phrases
 
 Respond in this exact JSON format (no markdown, no backticks):
 {{
@@ -101,9 +103,12 @@ Respond in this exact JSON format (no markdown, no backticks):
             content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
             query_data = json.loads(content)
 
+            # Strip any quotes the model may have included — GNews rejects them
+            clean_query = query_data.get("search_query", "").replace("'", "").replace('"', "")
+
             return {
                 "success": True,
-                "search_query": query_data.get("search_query", ""),
+                "search_query": clean_query,
                 "reasoning": query_data.get("reasoning", ""),
                 "terms_added": query_data.get("terms_added", []),
                 "terms_excluded": query_data.get("terms_excluded", []),
