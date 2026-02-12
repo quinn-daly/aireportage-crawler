@@ -295,17 +295,20 @@ Respond in this exact JSON format (no markdown, no backticks):
 
         prompt = f"""You are evaluating search results for an academic AI research archive.
 
-STUDENT'S RESEARCH KEYWORD: "{keyword}"
-STUDENT'S SEARCH INTENT: "{natural_language_query}"
+RESEARCH KEYWORD: "{keyword}"
+SEARCH INTENT: "{natural_language_query}"
 
 Below are {len(articles)} articles returned by a keyword search. For each article, 
 assign a relevance score from 0-100 and a brief explanation.
 
 Scoring criteria:
-- 80-100: Directly addresses the student's research intent AND relates to AI
+- 80-100: Directly addresses the search intent AND relates to AI
 - 60-79: Related to the topic but tangential, or only loosely connected to AI
 - 40-59: Mentions relevant terms but is really about something else
 - 0-39: Not relevant (e.g., keyword coincidence, different domain entirely)
+
+Important: In your explanations, do NOT reference "the student" or "student's intent". 
+Just explain what the article is about and why it scored the way it did.
 
 ARTICLES:
 {articles_text}
@@ -373,14 +376,137 @@ Respond with ONLY a JSON array (no markdown, no backticks). Each element should 
                 article['semantic_rank'] = article['rank']
             return articles[:top_n]
 
+    # ============================================
+    # STEP 4: KEYWORD CONTEXT ANALYSIS
+    # ============================================
+    # For each article, the LLM reads the content and explains
+    # how the student's assigned keyword is used or implied in
+    # the article, and provides a contextual definition.
+    #
+    # This is central to AIReportage's pedagogical goal:
+    # students don't just find articles that mention a keyword —
+    # they develop an interpretive understanding of how that
+    # concept operates in different contexts.
+    #
+    # Example: "Robot" in a healthcare article might mean
+    # "an AI-assisted surgical system that extends a surgeon's
+    # precision" — very different from "robot" in a manufacturing
+    # article where it means "an autonomous machine replacing
+    # human labor on an assembly line."
+    # ============================================
+
+    VALID_KEYWORDS = [
+        'authorship', 'data', 'embodiment', 'hallucination',
+        'imagination', 'innovation', 'labor', 'neural',
+        'policy', 'risk', 'robot', 'sentience', 'trust', 'visualization'
+    ]
+
+    def analyze_keyword_context(self, articles: List[Dict], keyword: str) -> List[Dict]:
+        """
+        Use OpenAI to analyze how the assigned keyword is used or
+        implied in each article's content.
+
+        Args:
+            articles: List of scored articles (Step 3 output)
+            keyword: The student's assigned AIReportage keyword
+
+        Returns:
+            Same articles list with 'keyword_usage' and 'keyword_definition' added
+        """
+
+        if not articles:
+            return articles
+
+        # Validate keyword
+        keyword_lower = keyword.strip().lower()
+        if keyword_lower not in self.VALID_KEYWORDS:
+            print(f"Warning: '{keyword}' not in standard keyword list, proceeding anyway")
+
+        # Build article representations
+        article_texts = []
+        for i, article in enumerate(articles):
+            content = (article.get('content') or '')[:600]
+            article_texts.append(
+                f"[{i}] {article['title']}\n"
+                f"    Content: {content}"
+            )
+
+        articles_block = "\n\n".join(article_texts)
+
+        prompt = f"""You are an academic research assistant for AIReportage.org, an archive 
+studying how AI concepts appear in news media.
+
+THE KEYWORD: "{keyword}"
+
+Below are {len(articles)} articles. For each article, provide a one-sentence 
+definition of what "{keyword}" means within the specific context of that article. 
+
+This should NOT be a dictionary definition — it should capture how this particular 
+article frames, uses, or implies the concept of "{keyword}". If the keyword doesn't 
+appear explicitly, define it based on the contextual connection between the article's 
+content and the concept.
+
+ARTICLES:
+{articles_block}
+
+Respond with ONLY a JSON array (no markdown, no backticks). Each element:
+{{
+    "index": 0,
+    "keyword_definition": "one sentence contextual definition"
+}}"""
+
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.openai_api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {"role": "system", "content": "You are a precise academic research assistant. Always respond with valid JSON arrays only."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 2000
+                },
+                timeout=45
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            content = data['choices'][0]['message']['content'].strip()
+            content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            analyses = json.loads(content)
+
+            # Merge into articles
+            analysis_map = {a['index']: a for a in analyses}
+
+            for i, article in enumerate(articles):
+                if i in analysis_map:
+                    article['keyword_definition'] = analysis_map[i].get('keyword_definition', '')
+                else:
+                    article['keyword_definition'] = ''
+
+            print(f"✓ Analyzed keyword context for {len(articles)} articles")
+            return articles
+
+        except Exception as e:
+            print(f"OpenAI keyword analysis failed: {e}")
+            for article in articles:
+                article['keyword_definition'] = f"Analysis unavailable: {str(e)}"
+            return articles
+
 
 # ============================================
 # GOOGLE CLOUD FUNCTION ENTRY POINT
 # ============================================
-# This orchestrates the 3-step pipeline:
+# This orchestrates the 4-step pipeline:
 #   1. Natural language → keyword query (OpenAI)
 #   2. Keyword query → articles (GNews)
 #   3. Articles → scored & ranked articles (OpenAI)
+#   4. Articles → keyword context analysis (OpenAI)
 # ============================================
 
 def crawl_articles(request):
@@ -481,6 +607,14 @@ def crawl_articles(request):
         else:
             scored_articles = gnews_result['articles'][:max_results]
 
+        # ---- STEP 4: Keyword context analysis ----
+        if scored_articles:
+            print("[PIPELINE] Step 4: Analyzing keyword context in articles...")
+            scored_articles = crawler.analyze_keyword_context(
+                articles=scored_articles,
+                keyword=keyword
+            )
+
         # ---- BUILD RESPONSE ----
         # Include all the transparency data students need to see
         result = {
@@ -522,3 +656,4 @@ def crawl_articles(request):
             500,
             headers
         )
+        
